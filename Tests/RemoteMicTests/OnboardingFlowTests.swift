@@ -66,10 +66,18 @@ struct OnboardingFlowTests {
     }
 
     @Test func siriRemoteRequiresBothBuildSupportAndInstallerReceipt() {
+        #if SAYALL_SIRI_REMOTE_ENABLED && !canImport(SayAllSiriRemote)
+        // 开放驱动随公开构建内置，不依赖安装组件收据，任何收据状态均视为已就绪。
+        #expect(OnboardingBuildCapabilities.isSiriRemotePackageInstalled { _ in false })
+        #expect(OnboardingBuildCapabilities.isSiriRemotePackageInstalled { path in
+            path == "/var/db/receipts/com.hd838a.RemoteMic.siri-remote.plist"
+        })
+        #else
         #expect(OnboardingBuildCapabilities.isSiriRemotePackageInstalled { path in
             path == "/var/db/receipts/com.hd838a.RemoteMic.siri-remote.plist"
         })
         #expect(!OnboardingBuildCapabilities.isSiriRemotePackageInstalled { _ in false })
+        #endif
         #expect(!OnboardingBuildCapabilities.availableControlSources(
             siriRemotePackageInstalled: false
         ).contains(.siriRemote))
@@ -96,6 +104,15 @@ struct OnboardingFlowTests {
             let resumed = AppSettings(defaults: defaults)
             resumed.beginOnboardingSiriRemoteTrial()
             #expect(resumed.onboardingSiriRemoteInitiallyEnabled == initiallyEnabled)
+            #if SAYALL_SIRI_REMOTE_ENABLED && !canImport(SayAllSiriRemote)
+            // 开放驱动不受会员门禁：任何决策都不会关停试用中的 Siri Remote。
+            for decision in [HostButtonProfilesAccessDecision.requiresPlus, .unavailable,
+                             .allowed(validUntil: .distantFuture),
+                             .temporarilyOffline(validUntil: .distantFuture),
+                             .authorized] {
+                #expect(!resumed.shouldDisableOnboardingSiriRemote(accessDecision: decision))
+            }
+            #else
             for decision in [HostButtonProfilesAccessDecision.requiresPlus, .unavailable] {
                 #expect(resumed.shouldDisableOnboardingSiriRemote(accessDecision: decision) == !initiallyEnabled)
             }
@@ -104,11 +121,16 @@ struct OnboardingFlowTests {
                              .authorized] {
                 #expect(!resumed.shouldDisableOnboardingSiriRemote(accessDecision: decision))
             }
+            #endif
             // Changing the selected source must not lose ownership of a temporary enable.
             resumed.setOnboardingControlSource(.xiaomiRemote)
             let model = BridgeAppModel(settings: resumed)
             model.completeOnboarding()
+            #if SAYALL_SIRI_REMOTE_ENABLED && !canImport(SayAllSiriRemote)
+            #expect(resumed.siriRemoteEnabled)
+            #else
             #expect(resumed.siriRemoteEnabled == initiallyEnabled)
+            #endif
             #expect(resumed.isOnboardingComplete)
             #expect(resumed.onboardingSiriRemoteInitiallyEnabled == nil)
         }
@@ -151,7 +173,12 @@ struct OnboardingFlowTests {
             fixture.model.enableSiriRemoteForOnboarding()
             fixture.probe.invoke("continue")
             #expect(fixture.settings.isOnboardingComplete)
+            #if SAYALL_SIRI_REMOTE_ENABLED && !canImport(SayAllSiriRemote)
+            // 开放驱动不受会员门禁，完成 Onboarding 不会关停试用。
+            #expect(fixture.settings.siriRemoteEnabled)
+            #else
             #expect(fixture.settings.siriRemoteEnabled == initiallyEnabled)
+            #endif
         }
     }
 

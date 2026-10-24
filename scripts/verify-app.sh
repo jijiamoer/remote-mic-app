@@ -105,13 +105,27 @@ if (( ${#FORBIDDEN_ICON_RESOURCES} > 0 )); then
   exit 1
 fi
 SAYALL_SIRI_REMOTE_INCLUDED="$(plutil -extract SayAllSiriRemoteIncluded raw -o - "$PLIST" 2>/dev/null || true)"
+SAYALL_APPLE_REMOTE_AUDIO_INCLUDED="$(plutil -extract SayAllAppleRemoteAudioIncluded raw -o - "$PLIST" 2>/dev/null || true)"
 SAYALL_SIRI_REMOTE_RESOURCE_BUNDLE="$APP/Contents/Resources/SayAllSiriRemote_SayAllSiriRemote.bundle"
 SAYALL_CHROMECAST_RESOURCE_BUNDLE="$APP/Contents/Resources/SayAllChromecast_SayAllChromecast.bundle"
-case "$SAYALL_SIRI_REMOTE_INCLUDED" in
+case "$SAYALL_APPLE_REMOTE_AUDIO_INCLUDED" in
   true)
     test -x "$APPLE_REMOTE_AUDIO_HELPER"
     test -x "$APPLE_REMOTE_HCI_SERVICE"
     test -f "$OPUS_DYLIB"
+    ;;
+  false|"")
+    test ! -e "$APPLE_REMOTE_AUDIO_HELPER"
+    test ! -e "$APPLE_REMOTE_HCI_SERVICE"
+    test ! -e "$OPUS_DYLIB"
+    ;;
+  *)
+    print -u2 "invalid SayAllAppleRemoteAudioIncluded marker"
+    exit 1
+    ;;
+esac
+case "$SAYALL_SIRI_REMOTE_INCLUDED" in
+  true)
     test -d "$SAYALL_SIRI_REMOTE_RESOURCE_BUNDLE"
     SIRI_REMOTE_SIGNATURE_DETAILS="$(codesign -dvvv "$APP" 2>&1)"
     print -r -- "$SIRI_REMOTE_SIGNATURE_DETAILS" | rg -q '^Authority=Developer ID Application:' || {
@@ -124,9 +138,6 @@ case "$SAYALL_SIRI_REMOTE_INCLUDED" in
     }
     ;;
   false|"")
-    test ! -e "$APPLE_REMOTE_AUDIO_HELPER"
-    test ! -e "$APPLE_REMOTE_HCI_SERVICE"
-    test ! -e "$OPUS_DYLIB"
     test ! -e "$SAYALL_SIRI_REMOTE_RESOURCE_BUNDLE"
     ;;
   *)
@@ -134,6 +145,11 @@ case "$SAYALL_SIRI_REMOTE_INCLUDED" in
     exit 1
     ;;
 esac
+if [[ "$SAYALL_SIRI_REMOTE_INCLUDED" == "true" &&
+      "$SAYALL_APPLE_REMOTE_AUDIO_INCLUDED" != "true" ]]; then
+  print -u2 "SayAllSiriRemoteIncluded requires SayAllAppleRemoteAudioIncluded"
+  exit 1
+fi
 test -d "$SPARKLE_FRAMEWORK"
 test -x "$SPARKLE_FRAMEWORK/Versions/B/Sparkle"
 test -x "$SPARKLE_FRAMEWORK/Versions/B/Autoupdate"
@@ -524,15 +540,17 @@ fi
 
 codesign --verify --deep --strict "$APP"
 codesign --verify --strict "$MCP_HELPER"
-if [[ "$SAYALL_SIRI_REMOTE_INCLUDED" == "true" ]]; then
+if [[ "$SAYALL_APPLE_REMOTE_AUDIO_INCLUDED" == "true" ]]; then
   codesign --verify --strict "$APPLE_REMOTE_AUDIO_HELPER"
   codesign --verify --strict "$APPLE_REMOTE_HCI_SERVICE"
   codesign --verify --strict "$APPLE_REMOTE_HCI_UPGRADE_SERVICE"
   cmp -s "$APPLE_REMOTE_HCI_SERVICE" "$APPLE_REMOTE_HCI_UPGRADE_SERVICE"
   test "$(/usr/libexec/PlistBuddy -c 'Print :SMPrivilegedExecutables:com.hd838a.SayAll.AppleRemoteHCIService' "$PLIST")" = \
     'identifier "com.hd838a.SayAll.AppleRemoteHCIService" and anchor apple generic and certificate leaf[subject.OU] = "L3QHLDRPAY"'
-  otool -l "$APPLE_REMOTE_HCI_UPGRADE_SERVICE" | rg -q 'sectname __info_plist'
-  otool -l "$APPLE_REMOTE_HCI_UPGRADE_SERVICE" | rg -q 'sectname __launchd_plist'
+  if [[ "$SAYALL_SIRI_REMOTE_INCLUDED" == "true" ]]; then
+    otool -l "$APPLE_REMOTE_HCI_UPGRADE_SERVICE" | rg -q 'sectname __info_plist'
+    otool -l "$APPLE_REMOTE_HCI_UPGRADE_SERVICE" | rg -q 'sectname __launchd_plist'
+  fi
   test "$(codesign -dvv "$APPLE_REMOTE_AUDIO_HELPER" 2>&1 | \
     sed -n 's/^Identifier=//p')" = "com.hd838a.RemoteMic.apple-remote-audio"
   test "$(codesign -dvv "$APPLE_REMOTE_HCI_SERVICE" 2>&1 | \
@@ -555,7 +573,7 @@ if [[ "$REQUIRE_DEVELOPER_ID_SIGNING" == "1" ]]; then
   print -r -- "$SIGNATURE_DETAILS" | rg -q "^TeamIdentifier=$EXPECTED_DEVELOPER_TEAM_ID$"
   print -r -- "$SIGNATURE_DETAILS" | rg -q '^CodeDirectory .*flags=.*runtime'
   signed_components=("$MCP_HELPER")
-  if [[ "$SAYALL_SIRI_REMOTE_INCLUDED" == "true" ]]; then
+  if [[ "$SAYALL_APPLE_REMOTE_AUDIO_INCLUDED" == "true" ]]; then
     signed_components+=(
       "$APPLE_REMOTE_AUDIO_HELPER"
       "$APPLE_REMOTE_HCI_SERVICE"
@@ -579,7 +597,7 @@ if [[ "$REQUIRE_DEVELOPER_ID_SIGNING" == "1" ]]; then
 fi
 file "$BINARY" | rg -q 'Mach-O 64-bit executable'
 file "$MCP_HELPER" | rg -q 'Mach-O 64-bit executable'
-if [[ "$SAYALL_SIRI_REMOTE_INCLUDED" == "true" ]]; then
+if [[ "$SAYALL_APPLE_REMOTE_AUDIO_INCLUDED" == "true" ]]; then
   file "$APPLE_REMOTE_AUDIO_HELPER" | rg -q 'Mach-O 64-bit executable'
   file "$APPLE_REMOTE_HCI_SERVICE" | rg -q 'Mach-O 64-bit executable'
   file "$OPUS_DYLIB" | rg -q 'Mach-O 64-bit dynamically linked shared library'
@@ -587,14 +605,14 @@ fi
 ARCHS="$(lipo -archs "$BINARY")"
 test "$ARCHS" = "$RELEASE_ARCH"
 test "$(lipo -archs "$MCP_HELPER")" = "$RELEASE_ARCH"
-if [[ "$SAYALL_SIRI_REMOTE_INCLUDED" == "true" ]]; then
+if [[ "$SAYALL_APPLE_REMOTE_AUDIO_INCLUDED" == "true" ]]; then
   test "$(lipo -archs "$APPLE_REMOTE_AUDIO_HELPER")" = "$RELEASE_ARCH"
   test "$(lipo -archs "$APPLE_REMOTE_HCI_SERVICE")" = "$RELEASE_ARCH"
   test "$(lipo -archs "$OPUS_DYLIB")" = "$RELEASE_ARCH"
 fi
 xcrun vtool -show-build "$BINARY" | rg -Fq "minos $RELEASE_MIN_SYSTEM_VERSION"
 xcrun vtool -show-build "$MCP_HELPER" | rg -Fq "minos $RELEASE_MIN_SYSTEM_VERSION"
-if [[ "$SAYALL_SIRI_REMOTE_INCLUDED" == "true" ]]; then
+if [[ "$SAYALL_APPLE_REMOTE_AUDIO_INCLUDED" == "true" ]]; then
   autoload -Uz is-at-least
   embedded_component_minimum_is_supported() {
     local component="$1"
@@ -630,7 +648,7 @@ if [[ "$RELEASE_VARIANT" == "intel" ]]; then
 fi
 
 EXPECTED_APP_FILES=$'Contents/Helpers/SayAllMCP\nContents/Info.plist\nContents/MacOS/RemoteMic\nContents/Resources/AppIcon.icns\nContents/Resources/COPYRIGHT.md\nContents/Resources/FirstInstallGuide.md\nContents/Resources/LICENSE.md\nContents/Resources/LOGO-LICENSE.md\nContents/Resources/RC003-remote-photo.png\nContents/Resources/README.md\nContents/Resources/StatusIconActiveTemplate.png\nContents/Resources/StatusIconActiveTemplate@2x.png\nContents/Resources/StatusIconTemplate.png\nContents/Resources/StatusIconTemplate@2x.png\nContents/Resources/TECHNICAL.md\nContents/Resources/THIRD_PARTY_NOTICES.md\nContents/Resources/TROUBLESHOOTING.md\nContents/_CodeSignature/CodeResources'
-if [[ "$SAYALL_SIRI_REMOTE_INCLUDED" == "true" ]]; then
+if [[ "$SAYALL_APPLE_REMOTE_AUDIO_INCLUDED" == "true" ]]; then
   EXPECTED_APP_FILES=$'Contents/Frameworks/libopus.0.dylib\nContents/Helpers/SayAllAppleRemoteAudioCapture\nContents/Helpers/SayAllAppleRemoteHCIService\nContents/Library/LaunchServices/com.hd838a.SayAll.AppleRemoteHCIService\n'"$EXPECTED_APP_FILES"
 fi
 while IFS= read -r expected_file; do

@@ -156,6 +156,110 @@ struct AppleRemoteAudioTests {
         #expect(parser.statistics.streamsLocked == 2)
     }
 
+    @Test func xpcParserLocksA2540CompactVoiceStream() {
+        var parser = AppleRemoteXPCVoiceParser()
+        var emitted: [Data] = []
+
+        // A2540 在 handle 0x36 上发送无填充紧凑帧：[u16 header][u16 seq][u8 len][Opus]
+        for sequence in UInt16(40)...UInt16(42) {
+            let body = a2540VoiceBody(sequence: sequence, opus: [0xB8, 0xAA, 0xBB, 0xCC])
+            let att = [UInt8]([0x1B, 0x36, 0x00] + body)
+            let l2cap = [UInt8]([
+                UInt8(att.count & 0xFF), UInt8(att.count >> 8), 0x04, 0x00,
+            ] + att)
+            let acl = [UInt8]([
+                0x42, 0x20, UInt8(l2cap.count & 0xFF), UInt8(l2cap.count >> 8),
+            ] + l2cap)
+            emitted.append(contentsOf: parser.ingestXPCPacket(Data([0x03] + acl)))
+        }
+
+        #expect(emitted == Array(repeating: Data([0xB8, 0xAA, 0xBB, 0xCC]), count: 3))
+        #expect(parser.statistics.streamsLocked == 1)
+    }
+
+    @Test func xpcParserStripsZeroPrefixOnlyOnHandle0035() {
+        // handle 0x35 上带 0x00 前缀的值剥一层后解析；同一形状出现在
+        // handle 0x36 上不得剥层（0x00 可能是合法帧头首字节）。
+        var stripParser = AppleRemoteXPCVoiceParser()
+        var stripEmitted: [Data] = []
+        var keepParser = AppleRemoteXPCVoiceParser()
+        var keepEmitted: [Data] = []
+
+        for sequence in UInt16(50)...UInt16(52) {
+            let body = [UInt8]([0x00] + a2540VoiceBody(
+                sequence: sequence,
+                opus: [0xB8, 0xAA]
+            ))
+            let stripAtt = [UInt8]([0x1B, 0x35, 0x00] + body)
+            let keepAtt = [UInt8]([0x1B, 0x36, 0x00] + body)
+            for (att, sink) in [(stripAtt, 0), (keepAtt, 1)] {
+                let l2cap = [UInt8]([
+                    UInt8(att.count & 0xFF), UInt8(att.count >> 8), 0x04, 0x00,
+                ] + att)
+                let acl = [UInt8]([
+                    0x42, 0x20, UInt8(l2cap.count & 0xFF), UInt8(l2cap.count >> 8),
+                ] + l2cap)
+                if sink == 0 {
+                    stripEmitted.append(contentsOf: stripParser.ingestXPCPacket(Data([0x03] + acl)))
+                } else {
+                    keepEmitted.append(contentsOf: keepParser.ingestXPCPacket(Data([0x03] + acl)))
+                }
+            }
+        }
+
+        #expect(stripEmitted == Array(repeating: Data([0xB8, 0xAA]), count: 3))
+        #expect(stripParser.statistics.streamsLocked == 1)
+        #expect(keepEmitted.isEmpty)
+        #expect(keepParser.statistics.streamsLocked == 0)
+    }
+
+    @Test func xpcParserRejectsMalformedCompactFrames() {
+        var parser = AppleRemoteXPCVoiceParser()
+        var emitted: [Data] = []
+
+        // 紧凑帧 Opus 数据后拖一字节垃圾：既非紧凑也非 99–100B 填充形状。
+        for sequence in UInt16(60)...UInt16(62) {
+            let body = a2540VoiceBody(sequence: sequence, opus: [0xB8, 0xAA]) + [0x7F]
+            let att = [UInt8]([0x1B, 0x36, 0x00] + body)
+            let l2cap = [UInt8]([
+                UInt8(att.count & 0xFF), UInt8(att.count >> 8), 0x04, 0x00,
+            ] + att)
+            let acl = [UInt8]([
+                0x42, 0x20, UInt8(l2cap.count & 0xFF), UInt8(l2cap.count >> 8),
+            ] + l2cap)
+            emitted.append(contentsOf: parser.ingestXPCPacket(Data([0x03] + acl)))
+        }
+        // 声明长度超出实际：len=4 但帧只有 2 字节 Opus。
+        for sequence in UInt16(70)...UInt16(72) {
+            var body = a2540VoiceBody(sequence: sequence, opus: [0xB8, 0xAA])
+            body[4] = 4
+            let att = [UInt8]([0x1B, 0x36, 0x00] + body)
+            let l2cap = [UInt8]([
+                UInt8(att.count & 0xFF), UInt8(att.count >> 8), 0x04, 0x00,
+            ] + att)
+            let acl = [UInt8]([
+                0x42, 0x20, UInt8(l2cap.count & 0xFF), UInt8(l2cap.count >> 8),
+            ] + l2cap)
+            emitted.append(contentsOf: parser.ingestXPCPacket(Data([0x03] + acl)))
+        }
+        // TOC 非 0xB8：len 自洽但不是 Opus CELT 帧。
+        for sequence in UInt16(80)...UInt16(82) {
+            let body = a2540VoiceBody(sequence: sequence, opus: [0x78, 0xAA])
+            let att = [UInt8]([0x1B, 0x36, 0x00] + body)
+            let l2cap = [UInt8]([
+                UInt8(att.count & 0xFF), UInt8(att.count >> 8), 0x04, 0x00,
+            ] + att)
+            let acl = [UInt8]([
+                0x42, 0x20, UInt8(l2cap.count & 0xFF), UInt8(l2cap.count >> 8),
+            ] + l2cap)
+            emitted.append(contentsOf: parser.ingestXPCPacket(Data([0x03] + acl)))
+        }
+
+        #expect(emitted.isEmpty)
+        #expect(parser.statistics.streamsLocked == 0)
+        #expect(parser.statistics.validVoiceWrappers == 0)
+    }
+
     private func pklgRecord(type: UInt8, payload: [UInt8]) -> [UInt8] {
         var length = UInt32(9 + payload.count).bigEndian
         var record = Data(bytes: &length, count: 4)
@@ -174,6 +278,13 @@ struct AppleRemoteAudioTests {
         body[4] = UInt8(opus.count)
         body.replaceSubrange(5..<(5 + opus.count), with: opus)
         return body
+    }
+
+    private func a2540VoiceBody(sequence: UInt16, opus: [UInt8]) -> [UInt8] {
+        [0x01, 0x00,
+         UInt8(truncatingIfNeeded: sequence),
+         UInt8(truncatingIfNeeded: sequence >> 8),
+         UInt8(opus.count)] + opus
     }
 }
 #endif

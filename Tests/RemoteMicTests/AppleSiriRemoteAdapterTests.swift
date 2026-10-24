@@ -12,23 +12,35 @@ struct AppleSiriRemoteAdapterTests {
         instanceID: "test-device"
     )
 
-    @Test func acceptsOnlyA2854ApprovedInterfaces() {
+    @Test func acceptsBothModelsOnApprovedInterfacesOnly() {
         for usagePage in [0x01, 0x0C, 0x0D, 0xFF00] {
-            #expect(AppleSiriRemoteDeviceMatch.accepts(
-                vendorID: 0x004C,
-                productID: 0x0315,
-                primaryUsagePage: usagePage
-            ))
+            for productID in [
+                AppleSiriRemoteDeviceMatch.productIDA2540,
+                AppleSiriRemoteDeviceMatch.productIDA2854,
+            ] {
+                #expect(AppleSiriRemoteDeviceMatch.accepts(
+                    vendorID: 0x004C,
+                    productID: productID,
+                    primaryUsagePage: usagePage
+                ))
+            }
         }
-        #expect(!AppleSiriRemoteDeviceMatch.accepts(
-            vendorID: 0x004C,
-            productID: 0x0314,
-            primaryUsagePage: 0x0C
-        ))
         #expect(!AppleSiriRemoteDeviceMatch.accepts(
             vendorID: 0x004C,
             productID: 0x0315,
             primaryUsagePage: 0x20
+        ))
+        #expect(!AppleSiriRemoteDeviceMatch.accepts(
+            vendorID: 0x1234,
+            productID: AppleSiriRemoteDeviceMatch.productIDA2540,
+            primaryUsagePage: 0x0C
+        ))
+        // 受限匹配集可显式排除 A2540（例如单型号构建）。
+        #expect(!AppleSiriRemoteDeviceMatch.accepts(
+            vendorID: 0x004C,
+            productID: AppleSiriRemoteDeviceMatch.productIDA2540,
+            primaryUsagePage: 0x0C,
+            acceptedProductIDs: [AppleSiriRemoteDeviceMatch.productIDA2854]
         ))
     }
 
@@ -412,6 +424,55 @@ struct AppleSiriRemoteAdapterTests {
             .model == .unknown)
         #expect(settings.remoteDeviceProfiles.first(where: { $0.id == appleProfileID })?
             .model == .appleSiriRemoteA2854)
+    }
+
+    @Test func circularNavigationRoutesAllMovementToScrollAndCenterTapOnly() {
+        var interpreter = AppleSiriRemoteTouchInterpreter()
+        interpreter.setRoutingMode(.circularNavigation)
+
+        // 外圈拖动：圆周导航下全部输出 .scroll，绝不产生 .move。
+        var outputs = [
+            event(.began, x: 0.5, y: 0.05, time: 1.00),
+            event(.changed, x: 0.75, y: 0.15, time: 1.05),
+            event(.changed, x: 0.9, y: 0.5, time: 1.10),
+            event(.changed, x: 0.75, y: 0.85, time: 1.15),
+        ].flatMap { interpreter.handle($0) }
+        #expect(!outputs.isEmpty)
+        #expect(outputs.allSatisfy { output in
+            if case .scroll = output { return true }
+            return false
+        })
+        _ = interpreter.handle(event(.ended, x: 0.75, y: 0.85, time: 1.20))
+
+        // 中心区短促轻触：产出 .click（由宿主消费为中心确认）。
+        outputs = [
+            event(.began, x: 0.5, y: 0.5, time: 2.00),
+            event(.ended, x: 0.5, y: 0.5, time: 2.10),
+        ].flatMap { interpreter.handle($0) }
+        #expect(outputs == [.click])
+
+        // 外圈静止轻触：不做中心确认，也不回退为普通点击。
+        outputs = [
+            event(.began, x: 0.5, y: 0.05, time: 3.00),
+            event(.ended, x: 0.5, y: 0.05, time: 3.10),
+        ].flatMap { interpreter.handle($0) }
+        #expect(outputs.isEmpty)
+    }
+
+    @Test func circularNavigationModeSwitchClearsInFlightState() {
+        var interpreter = AppleSiriRemoteTouchInterpreter()
+
+        // 标准模式指针移动途中切入圆周导航：累计量被清空，
+        // 进行中的接触不产生跨模式残留输出。
+        _ = interpreter.handle(event(.began, x: 0.5, y: 0.5, time: 1.00))
+        _ = interpreter.handle(event(.changed, x: 0.55, y: 0.5, time: 1.05))
+        interpreter.setRoutingMode(.circularNavigation)
+        #expect(interpreter.routingMode == .circularNavigation)
+        let outputs = interpreter.handle(event(.changed, x: 0.6, y: 0.5, time: 1.10))
+        #expect(outputs.isEmpty)
+
+        interpreter.setRoutingMode(.standard)
+        #expect(interpreter.routingMode == .standard)
     }
 
     private func event(

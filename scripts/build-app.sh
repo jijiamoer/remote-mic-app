@@ -267,7 +267,8 @@ if [[ -n "$SAYALL_SIRI_REMOTE_PACKAGE_PATH" ]]; then
     fi
   done
 else
-  unset SAYALL_ENABLE_SIRI_REMOTE
+  # 保留用户显式传入的 SAYALL_ENABLE_SIRI_REMOTE：=1 时启用开放驱动
+  # OpenSiriRemoteFeature（无私有包），=0 或未设置时保持关闭。
   SAYALL_SIRI_REMOTE_INCLUDED=false
 fi
 if [[ "$SAYALL_SIRI_REMOTE_INCLUDED" == "true" &&
@@ -275,6 +276,16 @@ if [[ "$SAYALL_SIRI_REMOTE_INCLUDED" == "true" &&
       "$SIGNING_IDENTITY" == "-" ]]; then
   print -u2 "Siri Remote voice builds require Developer ID Application signing; ad-hoc builds cannot connect to the installed HCI helper"
   exit 1
+fi
+
+# 开放驱动（OpenSiriRemoteFeature）由 SAYALL_ENABLE_SIRI_REMOTE=1 显式开启，
+# 私有包存在时同样打包音频链路 helper 与 libopus；音频链路与 Siri Remote
+# 专属 UI/资源包解耦：开放构建打 helper 但不包含私有资源包。
+if [[ "$SAYALL_SIRI_REMOTE_INCLUDED" == "true" ||
+      "${SAYALL_ENABLE_SIRI_REMOTE:-}" == "1" ]]; then
+  SAYALL_APPLE_REMOTE_AUDIO_INCLUDED=true
+else
+  SAYALL_APPLE_REMOTE_AUDIO_INCLUDED=false
 fi
 
 # Chromecast 走标准 CoreBluetooth（ATVV GATT），不产出 helper、LaunchDaemon 或安装器组件，
@@ -493,6 +504,8 @@ else
 fi
 if [[ "$SAYALL_SIRI_REMOTE_INCLUDED" == "true" ]]; then
   SCRATCH_FLAVOR="${SCRATCH_FLAVOR}-siri-remote"
+elif [[ "$SAYALL_APPLE_REMOTE_AUDIO_INCLUDED" == "true" ]]; then
+  SCRATCH_FLAVOR="${SCRATCH_FLAVOR}-apple-remote-audio"
 fi
 if [[ "$SAYALL_CHROMECAST_INCLUDED" == "true" ]]; then
   SCRATCH_FLAVOR="${SCRATCH_FLAVOR}-chromecast"
@@ -562,7 +575,7 @@ fi
 mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Helpers" "$APP_DIR/Contents/Resources"
 test -d "$SPARKLE_FRAMEWORK"
 test -x "$MCP_HELPER_PATH"
-if [[ "$SAYALL_SIRI_REMOTE_INCLUDED" == "true" ]]; then
+if [[ "$SAYALL_APPLE_REMOTE_AUDIO_INCLUDED" == "true" ]]; then
   test -x "$APPLE_REMOTE_AUDIO_HELPER_PATH"
   test -x "$APPLE_REMOTE_HCI_SERVICE_PATH"
 fi
@@ -574,13 +587,15 @@ install_name_tool -add_rpath @executable_path/../Frameworks \
 ditto --norsrc --noextattr --noqtn --noacl \
   "$MCP_HELPER_PATH" "$APP_DIR/Contents/Helpers/SayAllMCP"
 strip -S -x "$APP_DIR/Contents/Helpers/SayAllMCP"
-if [[ "$SAYALL_SIRI_REMOTE_INCLUDED" == "true" ]]; then
+if [[ "$SAYALL_APPLE_REMOTE_AUDIO_INCLUDED" == "true" ]]; then
   ditto --norsrc --noextattr --noqtn --noacl \
     "$APPLE_REMOTE_AUDIO_HELPER_PATH" "$APP_DIR/Contents/Helpers/SayAllAppleRemoteAudioCapture"
   strip -S -x "$APP_DIR/Contents/Helpers/SayAllAppleRemoteAudioCapture"
   ditto --norsrc --noextattr --noqtn --noacl \
     "$APPLE_REMOTE_HCI_SERVICE_PATH" "$APP_DIR/Contents/Helpers/SayAllAppleRemoteHCIService"
   strip -S -x "$APP_DIR/Contents/Helpers/SayAllAppleRemoteHCIService"
+fi
+if [[ "$SAYALL_SIRI_REMOTE_INCLUDED" == "true" ]]; then
   if [[ ! -d "$SIRI_REMOTE_RESOURCE_BUNDLE" ]]; then
     print -u2 "SayAllSiriRemote resource bundle is missing from the Swift build"
     exit 1
@@ -635,8 +650,11 @@ fi
 plutil -remove SayAllSiriRemoteIncluded "$APP_DIR/Contents/Info.plist" 2>/dev/null || true
 plutil -insert SayAllSiriRemoteIncluded -bool "$SAYALL_SIRI_REMOTE_INCLUDED" \
   "$APP_DIR/Contents/Info.plist"
+plutil -remove SayAllAppleRemoteAudioIncluded "$APP_DIR/Contents/Info.plist" 2>/dev/null || true
+plutil -insert SayAllAppleRemoteAudioIncluded -bool "$SAYALL_APPLE_REMOTE_AUDIO_INCLUDED" \
+  "$APP_DIR/Contents/Info.plist"
 plutil -remove SMPrivilegedExecutables "$APP_DIR/Contents/Info.plist" 2>/dev/null || true
-if [[ "$SAYALL_SIRI_REMOTE_INCLUDED" == "true" ]]; then
+if [[ "$SAYALL_APPLE_REMOTE_AUDIO_INCLUDED" == "true" ]]; then
   plutil -insert SMPrivilegedExecutables -json \
     '{"com.hd838a.SayAll.AppleRemoteHCIService":"identifier \"com.hd838a.SayAll.AppleRemoteHCIService\" and anchor apple generic and certificate leaf[subject.OU] = \"L3QHLDRPAY\""}' \
     "$APP_DIR/Contents/Info.plist"
@@ -681,7 +699,7 @@ if [[ "$REQUIRE_EARLY_ACCESS_CONFIGURATION" == "1" ]]; then
   fi
 fi
 mkdir -p "$APP_DIR/Contents/Frameworks"
-if [[ "$SAYALL_SIRI_REMOTE_INCLUDED" == "true" ]]; then
+if [[ "$SAYALL_APPLE_REMOTE_AUDIO_INCLUDED" == "true" ]]; then
   OPUS_DYLIB=""
   for candidate in \
     "${SAYALL_OPUS_LIBRARY:-}" \
@@ -823,7 +841,7 @@ if [[ "$SIGNING_IDENTITY" != "-" ]]; then
       --timestamp \
       --sign "$SIGNING_IDENTITY" \
       "$APP_DIR/Contents/Helpers/SayAllMCP"
-  if [[ "$SAYALL_SIRI_REMOTE_INCLUDED" == "true" ]]; then
+  if [[ "$SAYALL_APPLE_REMOTE_AUDIO_INCLUDED" == "true" ]]; then
     codesign \
       --force \
       --options runtime \
@@ -900,7 +918,7 @@ if [[ "$SIGNING_IDENTITY" == "-" ]]; then
     --timestamp=none \
     --sign - \
     "$APP_DIR/Contents/Helpers/SayAllMCP"
-  if [[ "$SAYALL_SIRI_REMOTE_INCLUDED" == "true" ]]; then
+  if [[ "$SAYALL_APPLE_REMOTE_AUDIO_INCLUDED" == "true" ]]; then
     codesign \
       --force \
       --timestamp=none \

@@ -168,6 +168,26 @@ enum SiriRemoteTouchRoutingMode: String, Equatable {
     case circularNavigation = "circular_navigation"
 }
 
+/// Siri Remote 基础硬件支持是否需要会员权限的统一判定。
+/// 开放驱动（`SAYALL_SIRI_REMOTE_ENABLED && !canImport(SayAllSiriRemote)`）
+/// 随公开构建内置，不受会员门禁；私有包实现沿用既有 buttonProfiles 访问决策。
+enum SiriRemoteAccessPolicy {
+    static func requiresMembership(
+        accessDecision: HostButtonProfilesAccessDecision
+    ) -> Bool {
+        #if SAYALL_SIRI_REMOTE_ENABLED && !canImport(SayAllSiriRemote)
+        return false
+        #else
+        switch accessDecision {
+        case .allowed, .temporarilyOffline, .authorized:
+            return false
+        case .requiresPlus, .unavailable:
+            return true
+        }
+        #endif
+    }
+}
+
 final class SiriRemoteFeatureIntegration {
     var onConnection: ((SiriRemoteConnection) -> Void)?
     /// 遥控器自报的能力（连接可用时给出位域，链路不可用时给出空集合）。
@@ -182,6 +202,8 @@ final class SiriRemoteFeatureIntegration {
 
     #if SAYALL_SIRI_REMOTE_ENABLED && canImport(SayAllSiriRemote)
     private let feature: SayAllSiriRemoteFeature
+    #elseif SAYALL_SIRI_REMOTE_ENABLED
+    private let feature: OpenSiriRemoteFeature
     #endif
 
     init(logger: @escaping (String) -> Void = { _ in }) {
@@ -259,30 +281,52 @@ final class SiriRemoteFeatureIntegration {
                 source: snapshot.source
             ))
         }
+        #elseif SAYALL_SIRI_REMOTE_ENABLED
+        feature = OpenSiriRemoteFeature(logger: logger)
+        feature.onConnection = { [weak self] connection in
+            self?.onConnection?(connection)
+        }
+        feature.onDeclaredCapabilitiesChange = { [weak self] capabilities in
+            self?.onDeclaredCapabilitiesChange?(capabilities)
+        }
+        feature.onControlEvent = { [weak self] event in
+            self?.onControlEvent?(event)
+        }
+        feature.onSamples = { [weak self] samples in self?.onSamples?(samples) }
+        feature.onStatus = { [weak self] status in self?.onStatus?(status) }
+        feature.onTouchFeedback = { [weak self] feedback in
+            self?.onTouchFeedback?(feedback)
+        }
+        feature.onContextualScroll = { [weak self] pixels in
+            self?.onContextualScroll?(pixels) ?? false
+        }
+        feature.onCenterTapConfirmation = { [weak self] device in
+            self?.onCenterTapConfirmation?(device) ?? false
+        }
         #endif
     }
 
     func start(userInitiated: Bool = false) {
-        #if SAYALL_SIRI_REMOTE_ENABLED && canImport(SayAllSiriRemote)
+        #if SAYALL_SIRI_REMOTE_ENABLED
         feature.start(userInitiated: userInitiated)
         #endif
     }
 
     func restart(customMappingEnabled: Bool) {
-        #if SAYALL_SIRI_REMOTE_ENABLED && canImport(SayAllSiriRemote)
+        #if SAYALL_SIRI_REMOTE_ENABLED
         feature.restart(customMappingEnabled: customMappingEnabled)
         #endif
     }
 
     func stop() {
-        #if SAYALL_SIRI_REMOTE_ENABLED && canImport(SayAllSiriRemote)
+        #if SAYALL_SIRI_REMOTE_ENABLED
         feature.stop()
         #endif
     }
 
     @discardableResult
     func beginCapture() -> Bool {
-        #if SAYALL_SIRI_REMOTE_ENABLED && canImport(SayAllSiriRemote)
+        #if SAYALL_SIRI_REMOTE_ENABLED
         return feature.beginCapture()
         #else
         return false
@@ -291,7 +335,7 @@ final class SiriRemoteFeatureIntegration {
 
     @discardableResult
     func resumeCaptureIfStopping() -> Bool {
-        #if SAYALL_SIRI_REMOTE_ENABLED && canImport(SayAllSiriRemote)
+        #if SAYALL_SIRI_REMOTE_ENABLED
         return feature.resumeCaptureIfStopping()
         #else
         return false
@@ -299,7 +343,7 @@ final class SiriRemoteFeatureIntegration {
     }
 
     func stopCapture(completion: @escaping () -> Void) {
-        #if SAYALL_SIRI_REMOTE_ENABLED && canImport(SayAllSiriRemote)
+        #if SAYALL_SIRI_REMOTE_ENABLED
         feature.stopCapture(completion: completion)
         #else
         completion()
@@ -307,7 +351,7 @@ final class SiriRemoteFeatureIntegration {
     }
 
     func setVoiceTouchSuppressed(_ suppressed: Bool) {
-        #if SAYALL_SIRI_REMOTE_ENABLED && canImport(SayAllSiriRemote)
+        #if SAYALL_SIRI_REMOTE_ENABLED
         feature.setVoiceTouchSuppressed(suppressed)
         #endif
     }
@@ -318,6 +362,8 @@ final class SiriRemoteFeatureIntegration {
             return
         }
         feature.setTouchRoutingMode(privateMode)
+        #elseif SAYALL_SIRI_REMOTE_ENABLED
+        feature.setTouchRoutingMode(mode)
         #endif
     }
 

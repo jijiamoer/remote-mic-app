@@ -404,3 +404,43 @@ HARDWARE CONTROL phase=cancelled reason=device_disconnected cancelled_controls=2
 - 尚未由自动化覆盖：真实 IOHID 多接口报告、Hardened Runtime 下的 `MultitouchSupport` 真实回调、系统蓝牙配对、PacketLogger 真正 HCI 输出、Opus 固件帧兼容性、权限 TCC、CGEvent 最终投递和豆包最终转写。Developer ID、公证、staple、解压后深层签名与 Gatekeeper 属于本轮已通过的产物验证，不替代这些实机路径。
 - 本轮已启动 Developer ID 候选 App，并验证 HCI helper 授权进入 `packet_stream phase=ready result=authorized`。此前真实 A2854 已产生 PCM 与最终文字；当前改为无主动截尾的 closing/drain 构建仍需重新完成松键尾音和连续会话真机验收。
 - 用户实测必须完成用例一至七和稳定功能回归，未完成项应逐项记录，不能用软件测试代替真机验收。
+
+## 开放驱动构建与 A2540 适配（候选）
+
+本节描述 `SAYALL_ENABLE_SIRI_REMOTE=1` 且不提供 `SAYALL_SIRI_REMOTE_PACKAGE_PATH` 时编译进 RemoteMic 的开放驱动（`Sources/RemoteMic/OpenSiriRemoteFeature.swift`）。私有包存在时构建仍经 `canImport(SayAllSiriRemote)` 选择私有实现，两条实现路径互斥。
+
+### 开放驱动与私有实现的边界
+
+- 开放驱动复用公开代码：`AppleSiriRemoteAdapter`（IOHID 按键/触摸/断连）、`AppleRemoteAudioClient`（HCI 配置 → 系统 BTPacketLogger → Opus → PCM）与 `AppleRemoteTouchInterpreter`（含圆周导航路由模式）。设备发现、按键边沿、Siri 键会话、触摸输出、App 切换器圆周导航与原生事件抑制的可观察语义与私有路径一致。
+- `SAYALL_ENABLE_SIRI_REMOTE` 未设置或为 `0` 时功能保持关闭，社区构建仍为 opt-in；私有包路径存在时自动启用并选择私有实现。
+- 开放驱动不要求 Installer 收据与会员权限；`SiriRemoteAccessPolicy` 统一收敛 `SettingsView`、`AppSettings.shouldDisableOnboardingSiriRemote` 与 Onboarding 的会员门禁，开放构建完成 Onboarding 不会关停试用中的 Siri Remote。
+- 电量/电源快照在开放驱动中不发送（A2540 IOHID 无电量属性）；UI 在 `level == nil` 时自动隐藏电池项，符合硬件合同「缺少能力时明确不显示」。
+
+### A2540 协议事实（来源：独立验证项目 siri-remote-mic 的公开证据）
+
+- A2540 在 macOS 上枚举为多个 `IOHIDDevice` 接口。语音激活：遍历全部匹配接口逐个 `IOHIDDeviceOpen`，向声明了 Feature Report `0xFF` 的接口写 1 字节 `0xAF`；未声明 `0xFF` 的接口退化为遍历其全部 feature report。`0x0D` 触摸接口拒绝写入属正常现象，只要至少一个接口写入成功即视为激活成功。
+- A2540 没有停流 HID 命令：物理松开 Siri 键即停止语音包；`setActive(false)` 与 `deinit` 不得对 A2540 发送 A2854 的 `[0x98, 0x00]` 报告。
+- 语音帧经 ATT handle `0x36` 通知，为无填充紧凑帧 `[u16 header][u16 sequence][u8 opusLength][Opus]`（总长约 67–73 字节），Opus TOC 为 `0xB8`（48 kHz CELT）。解析器同时保留 A2854 的 99–100 字节零填充形状；其余包长或尾部非零的一律丢弃。
+- `libopus` 解码器的 `Fs` 参数是输出采样率：`AppleRemoteOpusDecoder(sampleRate: 16_000)` 对 `0xB8` 帧直接输出 16 kHz PCM（320 样本/20 ms），无需外置重采样。
+- A2540 深度休眠唤醒：长时间不按任何键后进入深度省电，蓝牙链路显示 Connected 但零 ATT 流量；实机上需先按任意实体键唤醒遥控器，再按 Siri 键才会出语音帧。测试语音前应排除该休眠态，不得把唤醒前的静默误判为链路故障。
+
+### 开放构建的 HCI 信任边界与手动开启路径
+
+- 正式安装包依赖以 `L3QHLDRPAY` 签名的 root HCI helper（LaunchDaemon，由 PKG 安装器注册）完成临时 HCI tracing 与授权。ad-hoc 或非该 Team 签名的开放构建无法通过 helper 的签名校验。
+- `AppleRemoteAudioClient` 在 helper 准备失败时自动回退直连系统 `com.apple.bluetooth.BTPacketLogger` XPC：若用户已手动开启 HCI 调试跟踪即可直接收包；未开启时 packet logger 以自身事件给出 `unavailable:hci_voice_tracing_disabled` 或授权失败状态，绝不回退到 Mac 内置麦克风。
+- 手动开启（需 sudo，行为与 siri-remote-mic 的 `srm hci on` 一致）：
+
+  ```bash
+  sudo defaults write /Library/Preferences/com.apple.MobileBluetooth.debug HCITraces -dict \
+      HCILiveTraces -bool true HCIFileTraces -bool true \
+      RawAudioTrace -bool true HIDTrace -bool true HCISkipAuth -bool true
+  sudo killall -30 bluetoothd
+  ```
+
+  关闭时将各键写为 `false` 并再次 `killall -30 bluetoothd`；开启期间 bluetoothd 会向 `/var/log/` 落盘 HCI trace，测试完成后必须关闭。
+- 开放构建打包 `SayAllAppleRemoteAudioCapture`、`SayAllAppleRemoteHCIService` 与 `libopus`（Info.plist 标记 `SayAllAppleRemoteAudioIncluded`），不要求私有 `SayAllSiriRemote` 资源包；`SayAllSiriRemoteIncluded` 为 `true` 的私有构建仍强制 Developer ID（`L3QHLDRPAY`）签名检查。
+
+### 验证边界
+
+- 当前为候选实现：自动化覆盖双 PID/usage page 匹配、紧凑帧解析、handle 0x35 的 `0x00` 剥层、畸形帧拒绝、流锁定与圆周导航路由模式；`swift test --disable-keychain` 在 `SAYALL_ENABLE_SIRI_REMOTE=1` 与默认构建下均通过。
+- 未完成验收项：真实 A2540 的配对、多接口枚举、`0xAF` 激活、深度休眠唤醒、首字延迟、松键尾音、连续会话、断连恢复、手动 HCITraces 回退路径与虚拟麦端到端，均须按本手册实机矩阵在真实 A2540 上执行；未通过前不得宣称 A2540 正式兼容。

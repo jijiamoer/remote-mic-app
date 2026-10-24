@@ -2283,7 +2283,7 @@ struct SettingsView: View {
     private func remoteDeviceSelector(vertical: Bool = false) -> some View {
         let visibleProfiles = RemoteDeviceNamePolicy.sortedForCards(
             settings.remoteDeviceProfiles.filter { profile in
-                #if SAYALL_SIRI_REMOTE_ENABLED && canImport(SayAllSiriRemote)
+                #if SAYALL_SIRI_REMOTE_ENABLED
                 // Keep the activation entry available while the Apple adapter is stopped.
                 model.isRemoteConnected(profile.id) || profile.model.isAppleSiriRemote
                 #else
@@ -2405,7 +2405,7 @@ struct SettingsView: View {
                 .lineLimit(1)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            #if SAYALL_SIRI_REMOTE_ENABLED && canImport(SayAllSiriRemote)
+            #if SAYALL_SIRI_REMOTE_ENABLED
             if profile.model.isAppleSiriRemote && !siriRemoteMembershipRequired {
                 siriRemoteCardActions(profile)
                     .fixedSize()
@@ -2435,15 +2435,12 @@ struct SettingsView: View {
 
     private func requiresSiriRemoteMembership(for profile: RemoteDeviceProfile) -> Bool {
         guard profile.model.isAppleSiriRemote else { return false }
-        switch membershipFeature.buttonProfilesAccessDecision {
-        case .allowed, .temporarilyOffline, .authorized:
-            return false
-        case .requiresPlus, .unavailable:
-            return true
-        }
+        return SiriRemoteAccessPolicy.requiresMembership(
+            accessDecision: membershipFeature.buttonProfilesAccessDecision
+        )
     }
 
-    #if SAYALL_SIRI_REMOTE_ENABLED && canImport(SayAllSiriRemote)
+    #if SAYALL_SIRI_REMOTE_ENABLED
     private func siriRemoteCardActions(_ profile: RemoteDeviceProfile) -> some View {
         VStack(spacing: 4) {
             if !settings.siriRemoteEnabled {

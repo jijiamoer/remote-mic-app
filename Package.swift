@@ -83,11 +83,12 @@ let siriRemotePackagePath = ProcessInfo.processInfo.environment[
 let siriRemoteExplicitlyEnabled = ProcessInfo.processInfo.environment[
     "SAYALL_ENABLE_SIRI_REMOTE"
 ] == "1"
+// SAYALL_ENABLE_SIRI_REMOTE=1 且无私有包路径时编译开放驱动
+// OpenSiriRemoteFeature（由 #if !canImport(SayAllSiriRemote) 选择），
+// 不再要求 SAYALL_SIRI_REMOTE_PACKAGE_PATH；显式 "0" 或未设置时功能关闭，
+// 保持社区构建的 opt-in 语义（BuildSigningTests 门禁）。
 let siriRemoteEnabled = privateSwiftPMEnabled || siriRemoteExplicitlyEnabled ||
     !(siriRemotePackagePath ?? "").isEmpty
-if siriRemoteExplicitlyEnabled && (siriRemotePackagePath ?? "").isEmpty && !privateSwiftPMEnabled {
-    fatalError("SAYALL_ENABLE_SIRI_REMOTE=1 requires SAYALL_SIRI_REMOTE_PACKAGE_PATH")
-}
 let privateChromecastEnabled = privateSwiftPMEnabled &&
     ProcessInfo.processInfo.environment["SAYALL_ENABLE_CHROMECAST"] == "1"
 let privateButtonProfilesEnabled = privateSwiftPMEnabled &&

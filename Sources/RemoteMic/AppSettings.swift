@@ -1363,10 +1363,7 @@ final class AppSettings: ObservableObject {
         accessDecision: HostButtonProfilesAccessDecision
     ) -> Bool {
         guard onboardingSiriRemoteInitiallyEnabled == false, siriRemoteEnabled else { return false }
-        switch accessDecision {
-        case .allowed, .temporarilyOffline, .authorized: return false
-        case .requiresPlus, .unavailable: return true
-        }
+        return SiriRemoteAccessPolicy.requiresMembership(accessDecision: accessDecision)
     }
 
     func completeOnboarding() {
