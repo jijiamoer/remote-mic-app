@@ -9,6 +9,7 @@ dist/
 .codex-screenshots/
 .private-dependencies/
 /.worktrees/
+.argon/
 
 # Local credentials, signing identities, and notarization material.
 .env

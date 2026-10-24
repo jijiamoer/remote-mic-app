@@ -311,7 +311,9 @@ struct BuildSigningTests {
 
         #expect(packageSource.contains("SAYALL_SIRI_REMOTE_PACKAGE_PATH"))
         #expect(packageSource.contains("SAYALL_SIRI_REMOTE_ENABLED"))
-        #expect(packageSource.contains("requires SAYALL_SIRI_REMOTE_PACKAGE_PATH"))
+        // 显式 =1 且无私有包时回退到开放驱动 OpenSiriRemoteFeature；
+        // =0/未设置仍不启用，保持社区构建 opt-in 语义。
+        #expect(packageSource.contains("OpenSiriRemoteFeature"))
         #expect(buildSource.contains("SAYALL_SIRI_REMOTE_INCLUDED=false"))
         #expect(buildSource.contains("SayAllSiriRemoteIncluded"))
         #expect(buildSource.contains("unset SAYALL_SIRI_REMOTE_UI_ONLY"))

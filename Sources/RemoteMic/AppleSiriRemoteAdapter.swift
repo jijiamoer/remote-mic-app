@@ -142,19 +142,36 @@ enum AppleSiriRemoteControl: String, CaseIterable, Equatable {
 
 struct AppleSiriRemoteDeviceMatch: Equatable {
     static let vendorID = 0x004C
-    static let productID = 0x0315
+    static let productIDA2854 = 0x0315
+    static let productIDA2540 = 0x0314
+    static let productID = productIDA2854
+    static let supportedProductIDs: Set<Int> = [productIDA2854, productIDA2540]
     static let acceptedPrimaryUsagePages: Set<Int> = [0x01, 0x0C, 0x0D, 0xFF00]
 
-    static func accepts(vendorID: Int?, productID: Int?, primaryUsagePage: Int?) -> Bool {
+    static func accepts(
+        vendorID: Int?,
+        productID: Int?,
+        primaryUsagePage: Int?,
+        acceptedProductIDs: Set<Int> = supportedProductIDs
+    ) -> Bool {
         vendorID == Self.vendorID
-            && productID == Self.productID
-            && primaryUsagePage.map(acceptedPrimaryUsagePages.contains) == true
+            && productID.map(acceptedProductIDs.contains) == true
+            && primaryUsagePage.map(Self.acceptedPrimaryUsagePages.contains) == true
+    }
+
+    static func model(for productID: Int?) -> XiaomiRemoteModel? {
+        switch productID {
+        case productIDA2854: return .appleSiriRemoteA2854
+        case productIDA2540: return .appleSiriRemoteA2540
+        default: return nil
+        }
     }
 }
 
 final class AppleSiriRemoteAdapter {
     struct Connection: Equatable {
         let device: RemoteHardwareDeviceIdentity
+        let model: XiaomiRemoteModel
         let fingerprint: String
         let isConnected: Bool
     }
@@ -162,6 +179,7 @@ final class AppleSiriRemoteAdapter {
     private struct Interface {
         let device: IOHIDDevice
         let identity: RemoteHardwareDeviceIdentity
+        let model: XiaomiRemoteModel
         let fingerprint: String
         let touchSourceID: UInt64
     }
@@ -175,16 +193,14 @@ final class AppleSiriRemoteAdapter {
         let control: AppleSiriRemoteControl
     }
 
-    /// 本文件是**开放仓库的骨架**，不会被实例化：真正驱动苹果遥控器的是私有包
-    /// `SayAllSiriRemote`（`SAYALL_SIRI_REMOTE_ENABLED` 时启用），能力位是那里上报的。
-    ///
-    /// 能力只有一个来源——型号自己的代码 `SayAllSiriRemoteModel.capabilities`。
-    /// **不要把这里那份清单当成事实依据去改**：它与宿主界面无关（宿主从不读它），
-    /// 改了也不会生效，只会制造第二份真相。真正的自报通道见
-    /// `SiriRemoteFeatureIntegration.onDeclaredCapabilitiesChange`。
+    /// 私有构建中真正驱动苹果遥控器的是私有包 `SayAllSiriRemote`，能力位由
+    /// `SiriRemoteFeatureIntegration.onDeclaredCapabilitiesChange` 上报；
+    /// 开源构建（无该包）由 `OpenSiriRemoteFeature` 实例化本适配器。
+    /// `descriptor` 只提供 adapterID/型号占位等静态描述，宿主不据此判定能力。
     static let descriptor = RemoteHardwareDescriptor(
         adapterID: "apple_siri_remote",
-        modelID: "a2854",
+        // 适配器同时服务 A2540/A2854，具体型号由 Connection.model 按设备上报。
+        modelID: "apple_siri_remote",
         capabilities: [.controlEdges, .touchSurface, .continuousScroll]
     )
 
@@ -193,6 +209,7 @@ final class AppleSiriRemoteAdapter {
     var onTouchEvent: ((RemoteHardwareTouchEvent) -> Void)?
 
     private let lifecycleRouter = RemoteHardwareControlLifecycleRouter()
+    private let acceptedProductIDs: Set<Int>
     private let inputMonitoringGranted: () -> Bool
     private let permissionStatusProbe: PermissionStatusProbe
     private let logger: (String) -> Void
@@ -200,6 +217,7 @@ final class AppleSiriRemoteAdapter {
     private var interfaces: [UInt: Interface] = [:]
     private var interfaceCountByIdentity: [RemoteHardwareDeviceIdentity: Int] = [:]
     private var fingerprintByIdentity: [RemoteHardwareDeviceIdentity: String] = [:]
+    private var modelByIdentity: [RemoteHardwareDeviceIdentity: XiaomiRemoteModel] = [:]
     private var customMappingEnabled = false
     private var permissionTimer: DispatchSourceTimer?
     private var isPermissionQueryPending = false
@@ -215,10 +233,12 @@ final class AppleSiriRemoteAdapter {
     private let touchLock = NSLock()
 
     init(
+        acceptedProductIDs: Set<Int> = [AppleSiriRemoteDeviceMatch.productIDA2854],
         inputMonitoringGranted: @escaping () -> Bool = { HIDRemoteMonitor.isInputMonitoringGranted },
         permissionStatusProbe: PermissionStatusProbe = .shared,
         logger: @escaping (String) -> Void = AppLogger.shared.write
     ) {
+        self.acceptedProductIDs = acceptedProductIDs
         self.inputMonitoringGranted = inputMonitoringGranted
         self.permissionStatusProbe = permissionStatusProbe
         self.logger = logger
@@ -243,10 +263,15 @@ final class AppleSiriRemoteAdapter {
         }
 
         let manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
-        IOHIDManagerSetDeviceMatching(manager, [
-            kIOHIDVendorIDKey as String: AppleSiriRemoteDeviceMatch.vendorID,
-            kIOHIDProductIDKey as String: AppleSiriRemoteDeviceMatch.productID,
-        ] as CFDictionary)
+        IOHIDManagerSetDeviceMatchingMultiple(
+            manager,
+            acceptedProductIDs.sorted().map { productID in
+                [
+                    kIOHIDVendorIDKey as String: AppleSiriRemoteDeviceMatch.vendorID,
+                    kIOHIDProductIDKey as String: productID,
+                ]
+            } as CFArray
+        )
         let context = Unmanaged.passUnretained(self).toOpaque()
         IOHIDManagerRegisterDeviceMatchingCallback(manager, appleRemoteDeviceMatched, context)
         IOHIDManagerRegisterDeviceRemovalCallback(manager, appleRemoteDeviceRemoved, context)
@@ -272,7 +297,12 @@ final class AppleSiriRemoteAdapter {
         }
         self.manager = manager
         startPermissionMonitor()
-        logger("APPLE REMOTE START phase=completed result=monitoring model=a2854")
+        let models = acceptedProductIDs.sorted()
+            .compactMap { AppleSiriRemoteDeviceMatch.model(for: $0)?.rawValue }
+            .joined(separator: ",")
+        logger(
+            "APPLE REMOTE START phase=completed result=monitoring models=\(models)"
+        )
     }
 
     func stop(
@@ -302,6 +332,7 @@ final class AppleSiriRemoteAdapter {
         for (identity, fingerprint) in fingerprintByIdentity {
             onConnection?(Connection(
                 device: identity,
+                model: modelByIdentity[identity] ?? .appleSiriRemoteA2854,
                 fingerprint: fingerprint,
                 isConnected: false
             ))
@@ -313,6 +344,7 @@ final class AppleSiriRemoteAdapter {
         touchLock.unlock()
         interfaceCountByIdentity.removeAll()
         fingerprintByIdentity.removeAll()
+        modelByIdentity.removeAll()
         coalescedControlReports.removeAll()
         preferredTouchDeviceIdentity = nil
         guard let manager else { return }
@@ -337,8 +369,9 @@ final class AppleSiriRemoteAdapter {
         guard AppleSiriRemoteDeviceMatch.accepts(
             vendorID: vendorID,
             productID: productID,
-            primaryUsagePage: usagePage
-        ) else {
+            primaryUsagePage: usagePage,
+            acceptedProductIDs: acceptedProductIDs
+        ), let model = AppleSiriRemoteDeviceMatch.model(for: productID) else {
             logger("APPLE REMOTE DEVICE rejected reason=interface_not_approved")
             return
         }
@@ -386,6 +419,7 @@ final class AppleSiriRemoteAdapter {
         interfaces[key] = Interface(
             device: device,
             identity: identity,
+            model: model,
             fingerprint: fingerprint,
             touchSourceID: SAYAppleRemoteTouchSourceIDForHIDDevice(
                 Unmanaged.passUnretained(device).toOpaque()
@@ -400,6 +434,7 @@ final class AppleSiriRemoteAdapter {
         let previousCount = interfaceCountByIdentity[identity, default: 0]
         interfaceCountByIdentity[identity] = previousCount + 1
         fingerprintByIdentity[identity] = fingerprint
+        modelByIdentity[identity] = model
         touchLock.lock()
         touchFallbackIdentity = interfaceCountByIdentity.count == 1
             ? interfaceCountByIdentity.keys.first
@@ -408,12 +443,13 @@ final class AppleSiriRemoteAdapter {
         if previousCount == 0 {
             onConnection?(Connection(
                 device: identity,
+                model: model,
                 fingerprint: fingerprint,
                 isConnected: true
             ))
         }
         logger(
-            "APPLE REMOTE DEVICE phase=connected model=a2854 " +
+            "APPLE REMOTE DEVICE phase=connected model=\(Self.logName(for: model)) " +
                 "interface_page=\(stableHex(usagePage)) seized=\(isSeized)"
         )
         updateTouchSessionForConnectedDevices(forceRestart: true)
@@ -439,12 +475,17 @@ final class AppleSiriRemoteAdapter {
         if remainingCount == 0 {
             interfaceCountByIdentity.removeValue(forKey: interface.identity)
             fingerprintByIdentity.removeValue(forKey: interface.identity)
+            modelByIdentity.removeValue(forKey: interface.identity)
             onConnection?(Connection(
                 device: interface.identity,
+                model: interface.model,
                 fingerprint: interface.fingerprint,
                 isConnected: false
             ))
-            logger("APPLE REMOTE DEVICE phase=disconnected model=a2854")
+            logger(
+                "APPLE REMOTE DEVICE phase=disconnected " +
+                    "model=\(Self.logName(for: interface.model))"
+            )
         } else {
             interfaceCountByIdentity[interface.identity] = remainingCount
         }
@@ -694,6 +735,14 @@ final class AppleSiriRemoteAdapter {
         guard let value else { return "unknown" }
         return String(format: "0x%04x", value)
     }
+
+    static func logName(for model: XiaomiRemoteModel) -> String {
+        switch model {
+        case .appleSiriRemoteA2540: return "a2540"
+        case .appleSiriRemoteA2854: return "a2854"
+        default: return model.rawValue
+        }
+    }
 }
 
 enum AppleSiriRemoteTouchOutput: Equatable {
@@ -714,8 +763,12 @@ struct AppleSiriRemoteTouchInterpreter {
     private static let circularHighSpeed = 0.07
     private static let tapMaximumDuration = 0.22
     private static let tapMaximumDistance = 0.03
+    /// 圆周导航会话中的中心确认半径（归一化坐标）：短促轻触仅当起始与结束点
+    /// 都落在该半径内时才产出 `.click`，由宿主交给 AppSwitcher 确认消费。
+    private static let centerConfirmationRadius = 0.28
 
     private let tuning: RemoteHardwareTouchTuning
+    private(set) var routingMode: SiriRemoteTouchRoutingMode = .standard
     private var lastPosition: CGPoint?
     private var startPosition: CGPoint?
     private var startedAt: TimeInterval?
@@ -736,6 +789,15 @@ struct AppleSiriRemoteTouchInterpreter {
         suppressesCurrentContact = true
     }
 
+    /// 切换触摸输出路由。进入/退出圆周导航会话都必须清空在途累计量，
+    /// 使进行中的接触在新模式下从新事件开始重新判定（见
+    /// `Testing/HardwareCompatibilityContract.md` 上下文圆周导航条款）。
+    mutating func setRoutingMode(_ mode: SiriRemoteTouchRoutingMode) {
+        guard mode != routingMode else { return }
+        routingMode = mode
+        reset()
+    }
+
     mutating func handle(_ event: RemoteHardwareTouchEvent) -> [AppleSiriRemoteTouchOutput] {
         switch event.phase {
         case .began:
@@ -744,9 +806,11 @@ struct AppleSiriRemoteTouchInterpreter {
             lastPosition = point
             startPosition = point
             startedAt = event.timestampUptime
-            tapCandidate = true
+            // 圆周导航中仅中心区起手保留中心确认候选，外圈起手从第一帧
+            // 位移起就计入圆周角；标准模式下任何起手先按轻触候选处理。
+            tapCandidate = routingMode == .standard || Self.isWithinCenterConfirmation(point)
             circularEligible = hypot(point.x - 0.5, point.y - 0.5) >= tuning.minimumCircularRadius
-            if circularEligible {
+            if circularEligible || routingMode == .circularNavigation {
                 lastAngle = atan2(point.y - 0.5, point.x - 0.5)
             }
             return []
@@ -763,6 +827,19 @@ struct AppleSiriRemoteTouchInterpreter {
             let displacement = startPosition.map {
                 hypot(point.x - $0.x, point.y - $0.y)
             } ?? .infinity
+            if routingMode == .circularNavigation {
+                // 圆周导航会话：移动一律按圆周角输出滚动，绝不产生指针移动；
+                // 仍在短按容差内的接触保留为中心确认候选。
+                if tapCandidate {
+                    guard elapsed > Self.tapMaximumDuration
+                            || displacement > Self.tapMaximumDistance
+                    else { return [] }
+                    tapCandidate = false
+                    // 从当前位置重新开始角度跟踪，避免把径向移动计入圆周角。
+                    lastAngle = nil
+                }
+                return circularOutput(point: point)
+            }
             if circularEligible {
                 tapCandidate = false
                 return circularOutput(point: point)
@@ -803,11 +880,21 @@ struct AppleSiriRemoteTouchInterpreter {
                   hypot(lastPosition.x - startPosition.x, lastPosition.y - startPosition.y)
                     <= Self.tapMaximumDistance
             else { return [] }
+            if routingMode == .circularNavigation {
+                // 圆周导航中仅中心区短促轻触产出确认，其余轻触不输出任何动作。
+                guard Self.isWithinCenterConfirmation(startPosition),
+                      Self.isWithinCenterConfirmation(lastPosition)
+                else { return [] }
+            }
             return [.click]
         case .cancelled:
             reset()
             return []
         }
+    }
+
+    private static func isWithinCenterConfirmation(_ point: CGPoint) -> Bool {
+        hypot(point.x - 0.5, point.y - 0.5) <= centerConfirmationRadius
     }
 
     private mutating func circularOutput(point: CGPoint) -> [AppleSiriRemoteTouchOutput] {

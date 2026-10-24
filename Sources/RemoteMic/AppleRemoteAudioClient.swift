@@ -398,11 +398,15 @@ final class AppleRemoteAudioClient {
                 case .ready:
                     self.startPacketLogger()
                 case .failed(let reason):
-                    let status = "unavailable:\(reason)"
-                    self.reportStatus(status)
+                    // 特权 helper 不可用时仍尝试直连 BTPacketLogger：开放驱动构建
+                    // 中用户可能已手动开启 HCITraces/HCISkipAuth（见 srm hci on 等
+                    // 公开文档路径），此时系统 XPC 无需 root helper 即可收包。
+                    // 若未开启，packet logger 会以自身事件给出明确不可用状态。
                     self.logger(
-                        "APPLE REMOTE AUDIO packet_stream phase=failed reason=\(reason)"
+                        "APPLE REMOTE AUDIO packet_stream phase=hci_prepare_failed " +
+                            "reason=\(reason) fallback=direct_packet_logger"
                     )
+                    self.startPacketLogger()
                 }
             }
         }

@@ -526,7 +526,12 @@ enum OnboardingBuildCapabilities {
     static func isSiriRemotePackageInstalled(
         receiptExists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }
     ) -> Bool {
-        receiptExists("/var/db/receipts/com.hd838a.RemoteMic.siri-remote.plist")
+        #if SAYALL_SIRI_REMOTE_ENABLED && !canImport(SayAllSiriRemote)
+        // 开放驱动随公开构建内置，不依赖可选安装组件的收据。
+        return true
+        #else
+        return receiptExists("/var/db/receipts/com.hd838a.RemoteMic.siri-remote.plist")
+        #endif
     }
 
     static func availableControlSources(

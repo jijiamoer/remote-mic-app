@@ -154,7 +154,10 @@ public struct AppleRemoteXPCVoiceParser {
     }
 
     private mutating func classify(_ input: ATTValue) -> [Data] {
-        guard let packet = Self.decodeVoicePacket(input.value) else {
+        guard let packet = Self.decodeVoicePacket(
+            input.value,
+            attributeHandle: input.attributeHandle
+        ) else {
             if lockedSource == Source(
                 connectionHandle: input.connectionHandle,
                 attributeHandle: input.attributeHandle
@@ -216,20 +219,40 @@ public struct AppleRemoteXPCVoiceParser {
         )
     }
 
-    private static func decodeVoicePacket(_ value: Data) -> VoicePacket? {
+    private static func decodeVoicePacket(
+        _ value: Data,
+        attributeHandle: UInt16 = 0
+    ) -> VoicePacket? {
         let bytes = [UInt8](value)
-        var offsets: [Int] = []
-        if (99...100).contains(bytes.count) { offsets.append(0) }
-        if bytes.starts(with: [0xFA]), (99...100).contains(bytes.count - 1) { offsets.append(1) }
-        if bytes.starts(with: [0xA1, 0xFA]), (99...100).contains(bytes.count - 2) { offsets.append(2) }
+        // 候选偏移按序尝试，原始值优先；各前缀只在原始形式不自洽时才尝试。
+        // `0x00` 剥离仅限 handle 0x35（srm 实机证据），避免误剥合法 `00 xx`
+        // 帧头；0xFA/0xFF 为 reportID 前缀，`0xA1 + reportID` 为双字节前缀。
+        var offsets: [Int] = [0]
+        if attributeHandle == 0x0035, bytes.first == 0x00 {
+            offsets.append(1)
+        }
+        if let first = bytes.first, first == 0xFA || first == 0xFF {
+            offsets.append(1)
+        }
+        if bytes.starts(with: [0xA1, 0xFA]) || bytes.starts(with: [0xA1, 0xFF]) {
+            offsets.append(2)
+        }
         for offset in offsets {
-            guard bytes.count - offset >= 5 else { continue }
+            let payloadCount = bytes.count - offset
+            guard payloadCount >= 6 else { continue }
             let length = Int(bytes[offset + 4])
             let opusStart = offset + 5
             let opusEnd = opusStart + length
-            guard length > 0, opusEnd <= bytes.count,
+            // 两种合法形状：A2540 紧凑帧（Opus 数据即结尾，无尾字节）与
+            // A2854 的 99–100B 零填充 wrapper；其余长度一律视为噪声丢弃。
+            let isCompact = opusEnd == bytes.count
+            let isPadded = (99...100).contains(payloadCount)
+                && opusEnd <= bytes.count
+                && bytes[opusEnd..<bytes.count].allSatisfy { $0 == 0 }
+            guard (1...0x5E).contains(length),
                   (bytes[opusStart] & 0xFC) == 0xB8,
-                  bytes[opusEnd..<bytes.count].allSatisfy({ $0 == 0 }) else { continue }
+                  isCompact || isPadded
+            else { continue }
             return VoicePacket(
                 sequence: UInt16(bytes[offset + 2]) | (UInt16(bytes[offset + 3]) << 8),
                 opus: Data(bytes[opusStart..<opusEnd])
